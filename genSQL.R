@@ -2,61 +2,103 @@
 # SQL Translation
 #------------
 
-# Data
-#--------
 
-x1 <- runif(50, min = -10, max = 10)
-x2 <- runif(50, min = -10, max = 10)
-y <- x1 + x2 + rnorm(50, mean=0, sd = 3)
-y2 <- rbinom(50, size = 1, prob = 0.5)
+#--------------------
+# genSQL Function
+#     The genSQL function currently works for the following model types
+#              * Any lm model with interactions
+#              * Any binomial logistic regression model with interactions
+#              * Any rpart model
+# Input: model - an object of type lm(), glm(), or rpart()
+#        digits - the number of digits to round to, defaults to machine's floating point precision
+#        outcome.name - the name for the decision tree prediction, defaults to NULL
+# Output: An ANSI SQL calculation for the model
+# Calls: lm2sql(), glm2sql(), tree2sql()
+#------------------
 
-df <- data.frame(x1, x2, y)
-df2 <- data.frame(x1, x2, y2)
+genSQL <- function(model, digits = .Machine$sizeof.longdouble, outcome.name = NULL) {
+  model.class <- class(model)[1]
+  # Error handling
+  if (any(model.class == c("glm", "rpart", "lm")) == FALSE) {
+    warning(model.class, " is not a supported model type")
+    stop()
+  }
+  
+  # Model function selection
+    if (model.class == "lm") {
+        sql.statement <- lm2sql(lm.model = model, digits)
+    } else if (model.class == "glm") {
+        sql.statement <- glm2sql(glm.model = model, digits)
+    } else if (model.class == "rpart") {
+        sql.statement <- tree2sql(dtree=model, outcome.name)
+    }
+  
+  return(sql.statement)
+}
 
 
-x3 <- c(rep("Really Long Variable Name Here", times = 40), rep("Shorter Different Variable Name", times = 10))
-x3 <- factor(x3)
-y3 <- factor(c(rep(0, times = 40), rep(1, times = 10)))
-df3 <- data.frame(x1, x3, y3)
+#-----------------
+# lm2sql
+# Input: lm.model - a model of class "lm"
+#        digits - the number of digits to round to
+# Output: an SQL description of the model
+#----------------
 
-# LM
-#-----------
+lm2sql <- function(lm.model, digits) {
+  # Get the coefficients
+  coeff <- summary(lm.model)$coefficients[, "Estimate"]
+  coeff <- round(coeff, digits)
+  # Store the variable names
+  var.names <- rownames(summary(lm.model)$coefficients)
+  # Concatenate the coefficients and variable names
+  sql.var <- paste(coeff[-1], "*" ,var.names[-1], "+", collapse = " ")
+  # Concatentate the SQL syntax and add the intercept
+  sql.statement <- paste("SELECT", sql.var, coeff[1])
+  # Apply any interaction correction
+  sql.statement <- interaction.correction(sql.statement)
+  
+  return(sql.statement)
+}
 
-lm1 <- lm(y~., data=df)
+#-------------
+# glm2sql
+# Input: glm.model - a model of class "glm"
+#        digits - the number of digits to round to
+# Output: an SQL description of the model
+# Notes: only supports binomial logistic regression
+#----------------
 
-summary(lm1)$coefficients
+glm2sql <- function(glm.model, digits) {
+  # Error checking
+  if (glm.model$family$family != "binomial") {
+    warning("Only binomial logistic regression supported")
+    stop()
+  }
+  # Get the coefficients
+  coeff <- summary(glm.model)$coefficients[, "Estimate"]
+  coeff <- round(coeff, digits)
+  # Store the variable names
+  var.names <- rownames(summary(glm.model)$coefficients)
+  # Concatenate the coefficients and variable names
+  sql.var <- paste(coeff[-1], "*" ,var.names[-1], "+", collapse = " ")
+  # Concatenate the SQL syntax and add the intercept
+  sql.statement <- paste("SELECT 1 / (1 + exp(", sql.var, coeff[1], "))")
+  # Apply any interaction correction
+  sql.statement <- interaction.correction(sql.statement)
+  
+  return(sql.statement)
+}
 
-coeff <- summary(lm1)$coefficients[, "Estimate"]
-var.names <- rownames(summary(lm1)$coefficients)
-
-sql.var <- paste(coeff[-1], "*" ,var.names[-1], "+", collapse = " ")
-sql.statement <- paste("SELECT", sql.var, coeff[1])
-
-
-# GLM Log Reg
+#----------
+# interaction.check
+#   Checks to see if any of the specified model terms are interactions
+# Input: sql.statement -
+# Output: a sql statement with the interactions correctly specified
 #------------
-
-
-glm1 <- glm(y2~., data=df2, family = "binomial")
-summary(glm1)$coefficients
-
-coeff <- summary(glm1)$coefficients[, "Estimate"]
-var.names <- rownames(summary(glm1)$coefficients)
-
-sql.var <- paste(coeff[-1], "*" ,var.names[-1], "+", collapse = " ")
-sql.statement <- paste("SELECT 1 / (1 + exp(", sql.var, coeff[1], ")")
-
- 
-# Decision Tree
-#---------------
-library(rpart)
-
-# 2 parts
-# 1) Parse out variable name, sign, variable value, and output value
-# 2) Build the tree
-
-tree <- rpart(y2 ~., df2)
-tree2 <- rpart(y3~., data = df3, method="class")
+interaction.correction <- function(sql.statement) {
+ corrected.statement <- gsub(pattern=":", replacement="*", x=sql.statement) 
+ return(corrected.statement)
+}
 
 #---------------------------------
 # Tree Parse Function
@@ -112,7 +154,6 @@ tree.stack <- function(dtree) {
   return(df)
 }
 
-
 #------------------
 # Tree to SQL Translation Function
 # Input: dtree - a decision tree from rpart()
@@ -120,7 +161,6 @@ tree.stack <- function(dtree) {
 # Output: An ANSI SQL description of the model
 # Required: tree.stack(), node.pred(), tree.parse()
 #----------------
-
 
 tree2sql <- function(dtree, outcome.name) {
   
@@ -187,150 +227,7 @@ tree2sql <- function(dtree, outcome.name) {
   # END any hanging CASE clauses
   termination <- paste(rep("\nEND", times = branch.depth), collapse='')
   # Throw on the outcomes name
-  sql.statement <- paste(sql.statement, termination, "AS", outcome.name)
+  sql.statement <- paste("SELECT", sql.statement, termination, "AS", outcome.name)
   return(sql.statement)
 }
 
-writeLines(text = sql.statement, con = "C:/Temp/TreeSQL.txt")
-
-cat(sql.statement)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#-----------------
-# SQL Generation Exploration
-#---------------
-
-stack <- tree.stack(tree)
-outcome.name <- "y2"
-sql.statement <- NULL
-end.flag <- 0
-
-
-  print(end.flag)
-  rule.i <- stack[i, "rule"]
-  leaf.flag <- stack[i, "leaf"]
-
-
-# LEAF Statement
-  if (leaf.flag == 1) {
-    pred.i <- stack[i, "pred"]
-    statement.i <- paste("CASE WHEN", rule.i, "THEN", outcome.name, "=", pred.i, " END")
-  # NODE with no open CASE statements
-  } else if (leaf.flag == 0 & end.flag < 0) {
-      statement.i <- paste("END \n", "CASE WHEN", rule.i, "THEN")
-      end.flag <- end.flag + 1
-  # NODE with an open CASE statement
-  } else if (leaf.flag == 0 & end.flag >= 0) {
-      statement.i <- paste("CASE WHEN", rule.i, "THEN") 
-      end.flag <- end.flag - 1
-  }
-
-sql.statement <- paste(sql.statement, "\n" ,statement.i, ";", end.flag) # newline for every statement
-
-# Statement if the current rule is for a NODE
-  if (leaf.flag == 0) {
-    # Check to see if an open CASE statement needs to be closed
-    if (end.flag < 0) {
-      statement.i <- paste("END \n", "CASE WHEN", rule.i, "THEN")
-      end.flag <- end.flag + 1
-    } else {
-      statement.i <- paste("CASE WHEN", rule.i, "THEN") 
-      end.flag <- end.flag - 1
-    }
-  # Statement if the current rule is for a LEAF
-  }
-  if (leaf.flag == 1) {
-    pred.i <- stack[i, "pred"]
-    statement.i <- paste("CASE WHEN", rule.i, "THEN", outcome.name, "=", pred.i, " END")
-  }
-
-
-
-# The yval can be grabbed from tree$frame$yval - it's in the same order as the tree summary
-# Whether the node is terminal or not can be grabbed from tree$frame$var
-
-SELECT # End Flag = 0
-      CASE WHEN x2 >= 2.1 THEN    # End Flag = -1           
-          CASE WHEN x1 < 0.99 THEN 0 END # -1
-          CASE WHEN x1 >= 0.99 THEN 0.777 END # -1
-      END
-      CASE WHEN x2 < 2.1 THEN
-          CASE WHEN x2 < -3.1 THEN 0.466 END
-          CASE WHEN x2 >= -3.1 THEN 0.769 END
-      END
-
-
-
-          
-
-
-#-----------------
-# Parsing Exploration
-#-----------------
-
-
-tree <- rpart(y2 ~., df2)
-tree2 <- rpart(y3~., data = df3)
-
-check <- capture.output(tree)
-test <- check[7]
-
-check2 <- capture.output(tree2)
-test2 <- check2[8]
-
-# First Try
-# matches <- regexpr(pattern="x2[><=]+[-[:digit:]\\.]+", text=test)
-# regmatches(x = test, m=matches)
-
-# Second Try
-# test <- check[19]
-# matches <- regexpr(pattern="(x1|x2)[><=[:space:]]+[-[:digit:]\\.]+", text=test)
-# regmatches(x = test, m=matches)
-
-# First Working Solution
-#---------------
-# Get Variable names
-var.names <- colnames(df)
-# Build the "capture group" OR statement for variable names
-capture.group.string <- paste(var.names, "|", sep ='', collapse='')
-capture.group.string <- paste("(", substring(capture.group.string, first=1, last=nchar(capture.group.string)-1), ")", sep ='')
-# Insert the capture group into the regular expression
-d.pattern = paste(capture.group.string, "[><=[:space:]]+[-[:digit:]\\.]+", sep='')
-# Apply the regular expression to each element and pull out the match
-match <- regexpr(d.pattern, text = check)
-rule <- regmatches(check, m = match)
-
-
-
-matches <- regexpr(pattern="[[:digit:]]+[[:space:]]{2}[[:digit:]].*", text=test2)
-matches <- regexpr(pattern="[[:digit:]]+[[:space:]]{2}[[:digit:]].*", text=test2)
-regmatches(x = test2, m=matches, invert = TRUE)
-
-sub.result <- regmatches(x = test2, m=matches, invert = TRUE)[[1]][1]
-sub.match <- regexpr(pattern="[[:space:]]*[[:digit:]]+)[[:space:]]", text = sub.result)
-final.result <- regmatches(x = sub.result, m=sub.match, invert=TRUE)
-paste(unlist(final.result), collapse = '')
