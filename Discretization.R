@@ -139,6 +139,22 @@ integer.test <- function(x, tol = .Machine$double.eps) {
 
 
 
+#-------------------------------------------
+#Discretize continuous variable by # of bins
+#-------------------------------------------
+
+#Input: Continuous vector, number of desired bins
+#Output: Discretized vector, with elements corresponding to bin cutoff position
+#Required: foreach() package
+#Notes: Can be run in parallel by switching "%do%" for "%dopar%" and adding the SNOW package
+
+disc.width <- function(vector, num.bins) {
+    range <- max(vector) - min(vector)
+    cut <- range / num.bins
+    bin.vector <- foreach(i=1:length(vector), .combine="c") %do% {round(vector[i]/cut, digits=0)*cut}
+    return(bin.vector)
+}
+#----------------------------------------------
 
 
 
